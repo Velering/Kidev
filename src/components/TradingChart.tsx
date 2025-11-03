@@ -1,7 +1,7 @@
 // src/components/TradingChart.tsx
-import { createChart, IChartApi, ISeriesApi, UTCTimestamp } from 'lightweight-charts';
+import { createChart, type IChartApi, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts';
 import React, { useEffect, useRef } from 'react';
-import { Trade } from '../App'; // Import the Trade type
+import type { Trade } from '../App'; // Import the Trade type
 
 // --- Component Props ---
 // We define what information this component needs from its parent (App.tsx)

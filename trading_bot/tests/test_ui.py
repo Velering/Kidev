@@ -19,4 +19,4 @@ def test_dashboard_loads(client):
     """Test if the dashboard page loads successfully."""
     response = client.get('/')
     assert response.status_code == 200
-    assert b"Trading Bot Status" in response.data
+    assert b"Trading Bot Dashboard" in response.data

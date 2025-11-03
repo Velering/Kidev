@@ -63,10 +63,10 @@ def run_trading_loop():
     client = get_binance_client()
 
     symbol = 'BTCUSDT'
-    interval = Client.KLINE_INTERVAL_1HOUR
+    interval = Client.KLINE_INTERVAL_1MINUTE
     short_window = 10
     long_window = 50
-    lookback = f"{long_window + 5} hours ago UTC"
+    lookback = f"{long_window + 5} minutes ago UTC"
 
     while True:
         status_data = {
@@ -118,10 +118,9 @@ def run_trading_loop():
 
         finally:
             update_status_file(status_data)
-            # Wait for 1 hour (3600 seconds) before the next check.
-            # For demonstration, we'll use a shorter interval.
-            print("Waiting for 1 hour before next check...")
-            time.sleep(3600)
+            # Wait for 1 minute (60 seconds) before the next check.
+            print("Waiting for 1 minute before next check...")
+            time.sleep(60)
 
 if __name__ == "__main__":
     try:

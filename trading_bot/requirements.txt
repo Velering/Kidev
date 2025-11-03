@@ -1,6 +1,0 @@
-python-binance
-python-dotenv
-pandas
-Flask
-pytest
-requests-mock

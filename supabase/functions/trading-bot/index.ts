@@ -1,90 +1,138 @@
 // Import necessary libraries from Deno and Supabase
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders } from '../_shared/cors.ts';
 
-// --- Helper function to create a signature for Binance API ---
+// --- Configuration ---
+const SYMBOL = 'BTCUSDT';
+const INTERVAL = '1m';
+const SHORT_WINDOW = 10;
+const LONG_WINDOW = 50;
+const ORDER_QUANTITY = 0.001; // The amount of BTC to trade
+const STOP_LOSS_PERCENTAGE = 0.01; // 1%
+const TAKE_PROFIT_PERCENTAGE = 0.02; // 2%
+
+
+// --- Binance API Helper Functions ---
 async function createSignature(queryString: string, apiSecret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(apiSecret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(queryString));
-  return Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('');
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey('raw', encoder.encode(apiSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(queryString));
+    return Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// --- Function to place a real order on Binance Testnet ---
 async function placeTestnetOrder(symbol: string, side: 'BUY' | 'SELL', quantity: number, apiKey: string, apiSecret: string) {
-  const endpoint = 'https://testnet.binance.vision/api/v3/order';
-  const timestamp = Date.now();
-
-  const params = new URLSearchParams({
-    symbol,
-    side,
-    type: 'MARKET',
-    quantity: quantity.toString(),
-    timestamp: timestamp.toString(),
-  });
-
-  const queryString = params.toString();
-  const signature = await createSignature(queryString, apiSecret);
-  params.append('signature', signature);
-
-  const url = `${endpoint}?${params.toString()}`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'X-MBX-APIKEY': apiKey },
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(`Binance Testnet API error: ${data.msg || response.statusText}`);
-  }
-  console.log('Binance order successful:', data);
-  return data;
+    const endpoint = 'https://testnet.binance.vision/api/v3/order';
+    const timestamp = Date.now();
+    const params = new URLSearchParams({
+        symbol,
+        side,
+        type: 'MARKET',
+        quantity: quantity.toString(),
+        timestamp: timestamp.toString(),
+    });
+    const queryString = params.toString();
+    const signature = await createSignature(queryString, apiSecret);
+    params.append('signature', signature);
+    const url = `${endpoint}?${params.toString()}`;
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'X-MBX-APIKEY': apiKey },
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(`Binance Testnet API error: ${data.msg || response.statusText}`);
+    }
+    console.log(`Binance order successful: ${side} ${quantity} ${symbol}`, data);
+    return data;
 }
 
-// --- Trading Bot Logic ---
-async function handleRequest(req: Request) {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
-  }
+async function fetchCurrentPrice(symbol: string): Promise<number> {
+    const url = `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch current price for ${symbol}`);
+    const data = await response.json();
+    return parseFloat(data.price);
+}
 
-  try {
-    // --- Configuration ---
-    const symbol = 'BTCUSDT';
-    const interval = '1m';
-    const shortWindow = 10;
-    const longWindow = 50;
 
-    // --- 1. Fetch Live Market Data from Binance ---
-    const binanceUrl = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${longWindow + 5}`;
+// --- Main Trading Bot Logic ---
+async function runTradingLogic(supabase: SupabaseClient, apiKey: string, apiSecret: string) {
+    // --- 1. Check for and Manage Open Positions ---
+    const { data: openTrade, error: fetchError } = await supabase
+        .from('trades')
+        .select('*')
+        .eq('status', 'open')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+    if (fetchError && fetchError.code !== 'PGRST116') { // Ignore 'PGRST116' (No rows found)
+        throw new Error(`Supabase fetch error: ${fetchError.message}`);
+    }
+
+    if (openTrade) {
+        const currentPrice = await fetchCurrentPrice(SYMBOL);
+        let shouldClose = false;
+        let pnl = 0;
+
+        if (openTrade.type === 'buy') {
+            pnl = (currentPrice - openTrade.price) * openTrade.quantity;
+            if (currentPrice <= openTrade.stop_loss || currentPrice >= openTrade.take_profit) {
+                shouldClose = true;
+            }
+        } else { // sell
+            pnl = (openTrade.price - currentPrice) * openTrade.quantity;
+            if (currentPrice >= openTrade.stop_loss || currentPrice <= openTrade.take_profit) {
+                shouldClose = true;
+            }
+        }
+
+        // Update PnL in real-time for UI
+         await supabase.from('trades').update({ pnl }).eq('id', openTrade.id);
+
+        if (shouldClose) {
+            console.log(`Closing position for ${SYMBOL} due to SL/TP hit.`);
+            const closeSide = openTrade.type === 'buy' ? 'SELL' : 'BUY';
+            await placeTestnetOrder(SYMBOL, closeSide, openTrade.quantity, apiKey, apiSecret);
+
+            const { error: updateError } = await supabase
+                .from('trades')
+                .update({
+                    status: 'closed',
+                    closed_at: new Date().toISOString(),
+                    pnl // final pnl
+                })
+                .eq('id', openTrade.id);
+
+            if (updateError) throw new Error(`Supabase update error: ${updateError.message}`);
+            console.log(`Position closed. Final PnL: ${pnl}`);
+            return `Position for ${SYMBOL} closed.`; // End execution after closing a trade
+        } else {
+            return `Holding open position for ${SYMBOL}. Current PnL: ${pnl}`;
+        }
+    }
+
+    // --- 2. If No Open Position, Look for a New Signal ---
+    const binanceUrl = `https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=${LONG_WINDOW + 5}`;
     const binanceResponse = await fetch(binanceUrl);
     if (!binanceResponse.ok) throw new Error(`Binance API error: ${binanceResponse.statusText}`);
     const klines: any[] = await binanceResponse.json();
     const closePrices: number[] = klines.map(kline => parseFloat(kline[4]));
 
-    // --- 2. Implement Trading Strategy ---
     const calculateSMA = (prices: number[], window: number): number[] => {
-      const sma: number[] = [];
-      for (let i = 0; i <= prices.length - window; i++) {
-        const windowSlice = prices.slice(i, i + window);
-        const sum = windowSlice.reduce((acc, val) => acc + val, 0);
-        sma.push(sum / window);
-      }
-      return sma;
+        const sma: number[] = [];
+        for (let i = 0; i <= prices.length - window; i++) {
+            const windowSlice = prices.slice(i, i + window);
+            sma.push(windowSlice.reduce((a, b) => a + b, 0) / window);
+        }
+        return sma;
     };
 
-    const shortSMA = calculateSMA(closePrices, shortWindow);
-    const longSMA = calculateSMA(closePrices, longWindow);
+    const shortSMA = calculateSMA(closePrices, SHORT_WINDOW);
+    const longSMA = calculateSMA(closePrices, LONG_WINDOW);
 
-    if(shortSMA.length < 2 || longSMA.length < 2) throw new Error("Not enough data to calculate SMAs.");
+    if (shortSMA.length < 2 || longSMA.length < 2) throw new Error("Not enough data to calculate SMAs.");
 
     const lastShortSMA = shortSMA[shortSMA.length - 1];
     const prevShortSMA = shortSMA[shortSMA.length - 2];
@@ -96,67 +144,68 @@ async function handleRequest(req: Request) {
     else if (prevShortSMA >= prevLongSMA && lastShortSMA < lastLongSMA) signal = 'sell';
 
     if (!signal) {
-      return new Response(JSON.stringify({ message: 'No signal detected. Holding position.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+        return 'No new signal detected. Holding.';
     }
 
-    // --- 3. Get API Keys & Supabase client ---
-    const binanceApiKey = Deno.env.get('BINANCE_API_KEY')!;
-    const binanceApiSecret = Deno.env.get('BINANCE_SECRET_KEY')!;
-    if (!binanceApiKey || !binanceApiSecret) {
-      throw new Error("Binance API credentials are not set in Supabase environment variables.");
+    // --- 3. Execute New Trade and Open Position ---
+    console.log(`New signal detected: ${signal.toUpperCase()} for ${SYMBOL}`);
+    await placeTestnetOrder(SYMBOL, signal.toUpperCase() as 'BUY' | 'SELL', ORDER_QUANTITY, apiKey, apiSecret);
+
+    const entryPrice = closePrices[closePrices.length - 1];
+    let stopLoss, takeProfit;
+
+    if (signal === 'buy') {
+        stopLoss = entryPrice * (1 - STOP_LOSS_PERCENTAGE);
+        takeProfit = entryPrice * (1 + TAKE_PROFIT_PERCENTAGE);
+    } else { // sell
+        stopLoss = entryPrice * (1 + STOP_LOSS_PERCENTAGE);
+        takeProfit = entryPrice * (1 - TAKE_PROFIT_PERCENTAGE);
     }
 
-    const supabaseClient = createClient(
-      Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    );
-
-    // --- 4. Prevent duplicate trades ---
-    const { data: lastTrade } = await supabaseClient
-      .from('trades')
-      .select('type')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-
-    if (lastTrade && lastTrade.type === signal) {
-      return new Response(JSON.stringify({ message: `Signal is still '${signal}', but no new trade needed.` }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
-    }
-
-    // --- 5. Execute Live (Testnet) Trade ---
-    const orderQuantity = 0.001; // The amount of BTC to trade
-    await placeTestnetOrder(
-      symbol,
-      signal.toUpperCase() as 'BUY' | 'SELL',
-      orderQuantity,
-      binanceApiKey,
-      binanceApiSecret
-    );
-
-    // --- 6. Record Successful Trade in Supabase ---
-    const { error: insertError } = await supabaseClient
-      .from('trades')
-      .insert({
-        symbol: symbol,
+    const { error: insertError } = await supabase.from('trades').insert({
+        symbol: SYMBOL,
         type: signal,
-        price: closePrices[closePrices.length - 1],
-        quantity: orderQuantity,
-      });
-
-    if (insertError) throw new Error(`Supabase error inserting trade: ${insertError.message}`);
-
-    return new Response(JSON.stringify({ message: `Live Testnet trade executed and recorded: ${signal.toUpperCase()}` }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200,
+        price: entryPrice,
+        quantity: ORDER_QUANTITY,
+        status: 'open',
+        stop_loss: stopLoss,
+        take_profit: takeProfit,
     });
-  } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500,
-    });
-  }
+
+    if (insertError) throw new Error(`Supabase insert error: ${insertError.message}`);
+
+    return `New position opened for ${SYMBOL} at ${entryPrice}.`;
 }
 
-serve(handleRequest);
+
+// --- Edge Function Main Handler ---
+serve(async (req) => {
+    if (req.method === 'OPTIONS') {
+        return new Response('ok', { headers: corsHeaders });
+    }
+
+    try {
+        const supabaseClient = createClient(
+            Deno.env.get('SUPABASE_URL')!,
+            Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+        );
+        const binanceApiKey = Deno.env.get('BINANCE_API_KEY')!;
+        const binanceApiSecret = Deno.env.get('BINANCE_SECRET_KEY')!;
+        if (!binanceApiKey || !binanceApiSecret) {
+            throw new Error("Binance API credentials are not set in Supabase environment variables.");
+        }
+
+        const message = await runTradingLogic(supabaseClient, binanceApiKey, binanceApiSecret);
+
+        return new Response(JSON.stringify({ message }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 200,
+        });
+    } catch (error) {
+        console.error("Error in Edge Function:", error);
+        return new Response(JSON.stringify({ error: error.message }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 500,
+        });
+    }
+});

@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { supabase } from './supabaseClient';
-import TradingChart from './components/TradingChart'; // Import the new component
+import TradingChart from './components/TradingChart';
 
 // --- Type Definitions ---
-// This tells TypeScript what a 'Trade' object looks like
+// Erweitert, um die neuen Felder aus der Datenbank aufzunehmen
 export interface Trade {
   id: number;
   created_at: string;
@@ -11,6 +11,11 @@ export interface Trade {
   type: 'buy' | 'sell';
   price: number;
   quantity: number;
+  status: 'open' | 'closed'; // Neu
+  stop_loss?: number;       // Neu
+  take_profit?: number;      // Neu
+  pnl?: number;              // Neu (Profit and Loss)
+  closed_at?: string;        // Neu
 }
 
 function App() {
@@ -23,28 +28,38 @@ function App() {
       const { data, error } = await supabase
         .from('trades')
         .select('*')
-        .order('created_at', { ascending: false }); // Get newest trades first
+        .order('created_at', { ascending: false });
 
       if (error) {
         console.error('Error fetching trades:', error);
         setError('Could not fetch trade history.');
       } else {
-        setTrades(data);
+        setTrades(data as Trade[]);
       }
     };
 
     fetchInitialTrades();
 
-    // --- 2. Set up real-time subscription ---
+    // --- 2. Set up real-time subscription for INSERTS and UPDATES ---
     const subscription = supabase
-      .channel('trades-channel')
+      .channel('trades-channel-updates')
       .on<Trade>(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'trades' },
+        { event: '*', schema: 'public', table: 'trades' }, // Hört auf alle Änderungen
         (payload) => {
-          console.log('New trade received!', payload);
-          // Add the new trade to the top of our list
-          setTrades(currentTrades => [payload.new, ...currentTrades]);
+          console.log('Change received!', payload);
+
+          if (payload.eventType === 'INSERT') {
+            // Füge neuen Trade oben hinzu
+            setTrades(currentTrades => [payload.new, ...currentTrades]);
+          } else if (payload.eventType === 'UPDATE') {
+            // Finde und aktualisiere den bestehenden Trade in der Liste
+            setTrades(currentTrades =>
+              currentTrades.map(trade =>
+                trade.id === payload.new.id ? payload.new : trade
+              )
+            );
+          }
         }
       )
       .subscribe();
@@ -60,9 +75,7 @@ function App() {
       {/* Header */}
       <header className="p-4 border-b border-gray-700 flex justify-between items-center">
         <h1 className="text-2xl font-bold">Trading Bot Dashboard</h1>
-        <button className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition-colors">
-          Stop Bot (Not-Aus)
-        </button>
+        {/* Optional: Add a status indicator here later */}
       </header>
 
       <main className="p-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -82,14 +95,20 @@ function App() {
                 <tr>
                   <th className="p-2">Type</th>
                   <th className="p-2">Price</th>
+                  <th className="p-2">Status</th>
+                  <th className="p-2">PnL</th>
                   <th className="p-2">Time</th>
                 </tr>
               </thead>
               <tbody>
                 {trades.map(trade => (
-                  <tr key={trade.id} className={`border-t border-gray-700 ${trade.type === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
-                    <td className="p-2 uppercase font-bold">{trade.type}</td>
+                  <tr key={trade.id} className={`border-t border-gray-700 ${trade.status === 'open' ? 'bg-blue-900 bg-opacity-30' : ''}`}>
+                    <td className={`p-2 uppercase font-bold ${trade.type === 'buy' ? 'text-green-400' : 'text-red-400'}`}>{trade.type}</td>
                     <td className="p-2">{trade.price.toFixed(2)}</td>
+                    <td className={`p-2 font-semibold ${trade.status === 'open' ? 'text-yellow-400' : 'text-gray-400'}`}>{trade.status}</td>
+                    <td className={`p-2 font-mono ${!trade.pnl ? 'text-gray-500' : trade.pnl > 0 ? 'text-green-500' : 'text-red-500'}`}>
+                      {trade.pnl ? trade.pnl.toFixed(4) : 'N/A'}
+                    </td>
                     <td className="p-2 text-gray-400 text-sm">{new Date(trade.created_at).toLocaleTimeString()}</td>
                   </tr>
                 ))}

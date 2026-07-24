@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { isSupabaseConfigured, supabase } from './supabaseClient';
 import TradingChart from './components/TradingChart';
 
 export interface Trade {
@@ -19,69 +18,40 @@ export interface Trade {
 function App() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState<'live' | 'demo' | 'error'>(
-    isSupabaseConfigured ? 'live' : 'demo',
-  );
+  const [connectionStatus, setConnectionStatus] = useState<'live' | 'error'>('live');
 
   useEffect(() => {
-    if (!supabase) {
-      setConnectionStatus('demo');
-      setError('Supabase ist nicht konfiguriert. Chart läuft im Demo-Modus.');
-      return;
-    }
+    let cancelled = false;
 
-    const fetchInitialTrades = async () => {
-      const { data, error: fetchError } = await supabase
-        .from('trades')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (fetchError) {
-        console.error('Error fetching trades:', fetchError);
+    const loadTrades = async () => {
+      try {
+        const response = await fetch('/api/trades');
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const data = (await response.json()) as Trade[];
+        if (cancelled) return;
+        setTrades(data);
+        setConnectionStatus('live');
+        setError(null);
+      } catch (err) {
+        console.error('Error fetching trades:', err);
+        if (cancelled) return;
         setConnectionStatus('error');
         setError('Trade-Historie konnte nicht geladen werden. Chart bleibt verfügbar.');
-        return;
       }
-
-      setTrades(data as Trade[]);
-      setConnectionStatus('live');
-      setError(null);
     };
 
-    fetchInitialTrades();
-
-    const subscription = supabase
-      .channel('trades-channel-updates')
-      .on<Trade>(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'trades' },
-        (payload) => {
-          if (payload.eventType === 'INSERT') {
-            setTrades((currentTrades) => [payload.new, ...currentTrades]);
-          } else if (payload.eventType === 'UPDATE') {
-            setTrades((currentTrades) =>
-              currentTrades.map((trade) =>
-                trade.id === payload.new.id ? payload.new : trade,
-              ),
-            );
-          }
-        },
-      )
-      .subscribe();
-
+    loadTrades();
+    const intervalId = window.setInterval(loadTrades, 5_000);
     return () => {
-      supabase.removeChannel(subscription);
+      cancelled = true;
+      window.clearInterval(intervalId);
     };
   }, []);
 
-  const statusLabel =
-    connectionStatus === 'live' ? 'Live' : connectionStatus === 'demo' ? 'Demo' : 'Offline';
-  const statusColor =
-    connectionStatus === 'live'
-      ? 'bg-green-500'
-      : connectionStatus === 'demo'
-        ? 'bg-yellow-500'
-        : 'bg-red-500';
+  const statusLabel = connectionStatus === 'live' ? 'Live' : 'Offline';
+  const statusColor = connectionStatus === 'live' ? 'bg-green-500' : 'bg-red-500';
 
   return (
     <div className="bg-gray-900 text-gray-100 min-h-screen font-sans">
@@ -114,10 +84,10 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {trades.length === 0 && (
+                {trades.length === 0 && !error && (
                   <tr>
                     <td colSpan={5} className="p-4 text-gray-400 text-sm">
-                      Noch keine Trades. Der Live-Chart aktualisiert sich weiter.
+                      Noch keine Trades. Der Bot sucht nach SMA-Signalen…
                     </td>
                   </tr>
                 )}
@@ -138,9 +108,9 @@ function App() {
                       {trade.status}
                     </td>
                     <td
-                      className={`p-2 font-mono ${!trade.pnl ? 'text-gray-500' : trade.pnl > 0 ? 'text-green-500' : 'text-red-500'}`}
+                      className={`p-2 font-mono ${trade.pnl == null ? 'text-gray-500' : trade.pnl > 0 ? 'text-green-500' : 'text-red-500'}`}
                     >
-                      {trade.pnl ? trade.pnl.toFixed(4) : 'N/A'}
+                      {trade.pnl != null ? trade.pnl.toFixed(4) : 'N/A'}
                     </td>
                     <td className="p-2 text-gray-400 text-sm">
                       {new Date(trade.created_at).toLocaleTimeString()}

@@ -1,16 +1,17 @@
 # Kidev Learning Bot
 
-Paper-Trading-Bot, der **lernt**, wann Trades einen Edge haben — nicht nur Demo-Daten anzeigt.
+Paper-Trading-Bot am **echten BTC/USDT-Markt** (Binance Data API).  
+Er lernt fortlaufend, speichert den Stand in `data/`, und zeigt ehrlich:
 
-## Was er lernt
+- **Fortschritt** (Generationen + Daten + Confidence)
+- **Strategie-Sicherheit** (Confidence 0–100)
+- **Paper-Gewinn** (nur geschlossene Paper-Trades — Backtest zählt nicht als Gewinn)
 
-1. Holt BTC/USDT 1m-Kerzen von Binance Data API
-2. Evolutions-/Such-Schritt: EMA/RSI/ATR-Parameter
-3. Walk-forward: Train 70% / Validation 30%
-4. Handelt live nur, wenn Validation **profitabel** ist (PnL > 0, Profit Factor ≥ 1.05)
-5. Passt den Edge nach geschlossenen Paper-Trades online an
+## Reihenfolge der Unterhaltungen
 
-## Start (Produktion / ein Prozess)
+Siehe [docs/TIMELINE.md](docs/TIMELINE.md) — nacheinander, nicht parallel.
+
+## Start (dauerhaft lernen)
 
 ```bash
 npm install
@@ -19,25 +20,18 @@ npm start
 ```
 
 Dashboard: http://localhost:4173  
-APIs: `/api/learning`, `/api/trades`, `/api/stats`
+Lernen alle ~3 Min, Trade-Check jede Minute, State in `data/learning.json`.
 
-## Start (Dev: UI + Bot getrennt)
+## Ehrlichkeit
 
-```bash
-# Terminal 1 — Learning-Bot API
-npm run bot
+| Anzeige | Bedeutung |
+| --- | --- |
+| Backtest Train/Validation | Historische Simulation — **kein Geld** |
+| Paper-Gewinn | Simulierte Orders zu Marktpreisen — **kein Exchange-Fill** |
+| Echtes Geld | Erst wenn `readyForLive` (streng: ≥30 Paper-Trades, positiv, hohe Confidence) |
 
-# Terminal 2 — Vite UI (proxied /api → :8787)
-npm run dev
-```
-
-Dashboard: http://localhost:5173
-
-## Optional: Supabase Edge Function
-
-Die ältere Spot-Testnet-Logik liegt unter `supabase/functions/trading-bot` (long-only).  
-SQL für die `trades`-Tabelle: `supabase/migrations/`.
+Der Bot **lügt nicht** mit Backtest-PnL als „Gewinn“. Overfitting (Train negativ / Validation positiv) senkt die Confidence stark und blockiert Paper-Trading.
 
 ## Hinweis
 
-Das ist Paper-Trading / Forschung — keine Finanzberatung und kein Garant für Live-Gewinne.
+Forschung / Paper — keine Finanzberatung. Echtes Kapital erst nach langer, ehrlicher Paper-Phase.

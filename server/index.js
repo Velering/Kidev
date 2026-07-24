@@ -8,6 +8,7 @@ import {
   loadLearningState,
   recordOnlineTrade,
   saveLearningState,
+  computeHonesty,
 } from './lib/learner.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -120,12 +121,24 @@ async function runLearningCycle(candidates = 120, candlesHint) {
   try {
     const candles = candlesHint ?? (await fetchCandles());
     learning = learnFromCandles(candles, learning, { candidates });
+    const store = readStore();
+    const paperPnlUsdt = store.trades
+      .filter((t) => t.status === 'closed')
+      .reduce((a, t) => a + (t.pnl ?? 0), 0);
+    learning.honesty = computeHonesty(learning, {
+      candleCount: candles.length,
+      closedPaperTrades: learning.online.closedTrades,
+      paperPnlUsdt,
+    });
+    learning.online.edgeOk = learning.honesty.readyForPaper;
     saveLearningState(LEARNING_FILE, learning);
-    if (learning.online.edgeOk && learning.validation) {
-      lastLearnMessage = `Gen ${learning.generation}: edge OK — val PnL ${learning.validation.netPnlPct.toFixed(2)}%, PF ${learning.validation.profitFactor.toFixed(2)}, WR ${(learning.validation.winRate * 100).toFixed(0)}%`;
-    } else {
-      lastLearnMessage = `Gen ${learning.generation}: noch kein validierter Edge — weiter lernen…`;
-    }
+
+    const h = learning.honesty;
+    lastLearnMessage = `Gen ${learning.generation}: Fortschritt ${h.progress}% · Confidence ${h.confidence}% · Phase ${h.phase}${
+      learning.validation
+        ? ` · Val ${learning.validation.netPnlPct.toFixed(2)}% (Backtest)`
+        : ''
+    }`;
     console.log(`[learn] ${lastLearnMessage}`);
     return learning;
   } finally {
@@ -173,10 +186,13 @@ async function manageOpenPosition(store, currentPrice, candles) {
     openTrade.status = 'closed';
     openTrade.closed_at = new Date().toISOString();
     openTrade.reason = reason;
-    learning = recordOnlineTrade(learning, openTrade.pnl_pct);
+    const paperPnlUsdt = store.trades
+      .filter((t) => t.status === 'closed')
+      .reduce((a, t) => a + (t.pnl ?? 0), 0);
+    learning = recordOnlineTrade(learning, openTrade.pnl_pct, { paperPnlUsdt });
     saveLearningState(LEARNING_FILE, learning);
     writeStore(store);
-    return `Closed ${openTrade.type} via ${reason}. PnL=${pnl.toFixed(4)} (${(openTrade.pnl_pct * 100).toFixed(3)}%)`;
+    return `Closed ${openTrade.type} via ${reason}. Paper-PnL=${pnl.toFixed(4)} USDT (${(openTrade.pnl_pct * 100).toFixed(3)}%)`;
   }
 
   writeStore(store);
@@ -230,17 +246,35 @@ async function runTradingLogic() {
 }
 
 function publicLearning() {
+  const store = readStore();
+  const paperPnlUsdt = store.trades
+    .filter((t) => t.status === 'closed')
+    .reduce((a, t) => a + (t.pnl ?? 0), 0);
+  const honesty =
+    learning.honesty ??
+    computeHonesty(learning, {
+      candleCount: learning.candleCount ?? 0,
+      closedPaperTrades: learning.online.closedTrades,
+      paperPnlUsdt,
+    });
+
   return {
     generation: learning.generation,
     learnedAt: learning.learnedAt,
     message: lastLearnMessage,
     lastBotMessage,
-    edgeOk: learning.online.edgeOk,
+    edgeOk: honesty.readyForPaper,
     params: learning.params,
     train: learning.train,
     validation: learning.validation,
     online: learning.online,
-    history: learning.history.slice(0, 10),
+    history: learning.history.slice(0, 15),
+    honesty,
+    paperPnlUsdt,
+    candleCount: learning.candleCount ?? 0,
+    marketSource: learning.marketSource ?? 'binance-data-api',
+    disclaimer:
+      'Backtest- und Paper-PnL sind kein echtes Geld. Live-Kapital erst nach readyForLive.',
   };
 }
 
@@ -248,12 +282,17 @@ function publicStats(trades) {
   const closed = trades.filter((t) => t.status === 'closed');
   const wins = closed.filter((t) => (t.pnl ?? 0) > 0);
   const totalPnl = closed.reduce((a, t) => a + (t.pnl ?? 0), 0);
+  const honesty = learning.honesty ?? computeHonesty(learning, { paperPnlUsdt: totalPnl });
   return {
     openPositions: trades.filter((t) => t.status === 'open').length,
     closedTrades: closed.length,
     winRate: closed.length ? wins.length / closed.length : 0,
     realizedPnl: totalPnl,
-    mode: learning.online.edgeOk ? 'live_edge' : 'learning',
+    paperPnlUsdt: totalPnl,
+    mode: honesty.readyForPaper ? 'paper_trading' : 'learning',
+    confidence: honesty.confidence,
+    progress: honesty.progress,
+    readyForLive: honesty.readyForLive,
   };
 }
 
@@ -305,11 +344,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.startsWith('/api/health')) {
+    const h = learning.honesty ?? computeHonesty(learning, {});
     sendJson(res, 200, {
       ok: true,
       symbol: SYMBOL,
-      mode: learning.online.edgeOk ? 'live_edge' : 'learning',
+      mode: h.readyForPaper ? 'paper_trading' : 'learning',
       generation: learning.generation,
+      progress: h.progress,
+      confidence: h.confidence,
+      readyForLive: h.readyForLive,
       lastBotMessage,
       lastLearnMessage,
     });
@@ -380,13 +423,12 @@ server.listen(PORT, '0.0.0.0', () => {
   );
 });
 
-// Learn several generations at boot, then trade only with validated edge.
+// Continuous learning on real Binance candles; persist after every cycle.
 (async () => {
   try {
     const candles = await fetchCandles();
-    for (let i = 0; i < 5; i++) {
-      await runLearningCycle(160, candles);
-      if (learning.online.edgeOk) break;
+    for (let i = 0; i < 3; i++) {
+      await runLearningCycle(180, candles);
     }
     const msg = await runTradingLogic();
     console.log(`[bot] ${msg}`);
@@ -395,9 +437,10 @@ server.listen(PORT, '0.0.0.0', () => {
   }
 })();
 
+// Learn often — ordered continuous search, not parallel one-shots.
 setInterval(() => {
-  runLearningCycle().catch((error) => console.error('[learn] cycle failed:', error));
-}, 15 * 60_000);
+  runLearningCycle(140).catch((error) => console.error('[learn] cycle failed:', error));
+}, 3 * 60_000);
 
 setInterval(() => {
   runTradingLogic()

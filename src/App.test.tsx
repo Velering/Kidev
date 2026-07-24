@@ -43,6 +43,16 @@ describe('App', () => {
                 realizedPnlPct: 0,
                 edgeOk: false,
               },
+              honesty: {
+                confidence: 12,
+                progress: 18,
+                phase: 'searching',
+                readyForPaper: false,
+                readyForLive: false,
+                reasons: ['Noch keine geschlossenen Paper-Trades am echten Marktpreis.'],
+                labels: {},
+              },
+              paperPnlUsdt: 0,
             }),
           };
         }
@@ -54,7 +64,11 @@ describe('App', () => {
               closedTrades: 0,
               winRate: 0,
               realizedPnl: 0,
+              paperPnlUsdt: 0,
               mode: 'learning',
+              confidence: 12,
+              progress: 18,
+              readyForLive: false,
             }),
           };
         }
@@ -69,8 +83,8 @@ describe('App', () => {
       screen.getByRole('heading', { level: 1, name: /Kidev Learning Bot/i }),
     ).toBeInTheDocument();
     expect(screen.getByTestId('mock-chart')).toBeInTheDocument();
-    expect(
-      await screen.findByText(/noch kein validierter Edge|edge OK/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Fortschritt/i)).toBeInTheDocument();
+    expect(screen.getByText(/Strategie-Sicherheit/i)).toBeInTheDocument();
+    expect(screen.getByText(/Paper-Gewinn/i)).toBeInTheDocument();
   });
 });

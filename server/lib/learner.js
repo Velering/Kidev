@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { backtest, defaultParams, liveSignal } from './backtest.js';
+import { computeHonesty } from './honesty.js';
 
 /**
  * @typedef {import('./backtest.js').StrategyParams} StrategyParams
@@ -15,8 +16,11 @@ import { backtest, defaultParams, liveSignal } from './backtest.js';
  *  params: StrategyParams,
  *  train: null | Omit<BacktestResult, 'trades'>,
  *  validation: null | Omit<BacktestResult, 'trades'>,
- *  history: Array<{ generation: number, score: number, netPnlPct: number, winRate: number, profitFactor: number }>,
- *  online: { closedTrades: number, wins: number, losses: number, realizedPnlPct: number, edgeOk: boolean }
+ *  history: Array<{ generation: number, score: number, netPnlPct: number, winRate: number, profitFactor: number, confidence?: number }>,
+ *  online: { closedTrades: number, wins: number, losses: number, realizedPnlPct: number, edgeOk: boolean },
+ *  honesty?: ReturnType<typeof computeHonesty>,
+ *  candleCount?: number,
+ *  marketSource?: string
  * }} LearningState
  */
 
@@ -132,7 +136,8 @@ function stripTrades(result) {
 }
 
 /**
- * Walk-forward learning: optimize on train split, accept only if validation is profitable.
+ * Walk-forward learning: optimize on train split, accept paper trading only
+ * when honesty checks pass (train+validation consistency, sample size).
  * @param {Candle[]} candles
  * @param {LearningState} state
  * @param {{ candidates?: number }} [opts]
@@ -141,11 +146,15 @@ function stripTrades(result) {
 export function learnFromCandles(candles, state, opts = {}) {
   const candidates = opts.candidates ?? 80;
   if (candles.length < 200) {
-    return {
+    const next = {
       ...state,
       learnedAt: new Date().toISOString(),
+      candleCount: candles.length,
+      marketSource: 'binance-data-api',
       online: { ...state.online, edgeOk: false },
     };
+    next.honesty = computeHonesty(next, { candleCount: candles.length });
+    return next;
   }
 
   const split = Math.floor(candles.length * 0.7);
@@ -177,38 +186,41 @@ export function learnFromCandles(candles, state, opts = {}) {
   ranked.sort((a, b) => b.validation.score - a.validation.score);
 
   if (ranked.length === 0) {
-    return {
+    const generation = state.generation + 1;
+    const next = {
       ...state,
-      generation: state.generation + 1,
+      generation,
       learnedAt: new Date().toISOString(),
+      candleCount: candles.length,
+      marketSource: 'binance-data-api',
       online: { ...state.online, edgeOk: false },
       history: [
         {
-          generation: state.generation + 1,
+          generation,
           score: -999,
           netPnlPct: 0,
           winRate: 0,
           profitFactor: 0,
+          confidence: 0,
         },
         ...state.history,
-      ].slice(0, 30),
+      ].slice(0, 50),
     };
+    next.honesty = computeHonesty(next, { candleCount: candles.length });
+    return next;
   }
 
   const best = ranked[0];
   const generation = state.generation + 1;
-  const edgeOk =
-    best.validation.tradeCount >= 3 &&
-    best.validation.score > 0 &&
-    best.validation.netPnlPct > 0 &&
-    best.validation.profitFactor >= 1.05 &&
-    best.validation.expectancy > 0;
+  /** @type {LearningState} */
   const next = {
     generation,
     learnedAt: new Date().toISOString(),
     params: best.params,
     train: stripTrades(best.train),
     validation: stripTrades(best.validation),
+    candleCount: candles.length,
+    marketSource: 'binance-data-api',
     history: [
       {
         generation,
@@ -218,12 +230,17 @@ export function learnFromCandles(candles, state, opts = {}) {
         profitFactor: best.validation.profitFactor,
       },
       ...state.history,
-    ].slice(0, 30),
+    ].slice(0, 50),
     online: {
       ...state.online,
-      edgeOk,
+      edgeOk: false,
     },
   };
+
+  const honesty = computeHonesty(next, { candleCount: candles.length });
+  next.honesty = honesty;
+  next.online.edgeOk = honesty.readyForPaper;
+  if (next.history[0]) next.history[0].confidence = honesty.confidence;
   return next;
 }
 
@@ -231,21 +248,26 @@ export function learnFromCandles(candles, state, opts = {}) {
  * Update online edge estimate after a closed live paper trade.
  * @param {LearningState} state
  * @param {number} pnlPct  // decimal, e.g. 0.01 = +1%
+ * @param {{ paperPnlUsdt?: number }} [ctx]
  */
-export function recordOnlineTrade(state, pnlPct) {
+export function recordOnlineTrade(state, pnlPct, ctx = {}) {
   const online = { ...state.online };
   online.closedTrades += 1;
   if (pnlPct > 0) online.wins += 1;
   else online.losses += 1;
   online.realizedPnlPct += pnlPct * 100;
 
-  const winRate = online.closedTrades ? online.wins / online.closedTrades : 0;
-  const avg = online.closedTrades ? online.realizedPnlPct / online.closedTrades : 0;
-  // Require validation edge AND non-terrible live results once we have sample size.
-  const liveOk = online.closedTrades < 5 || (winRate >= 0.4 && avg > -0.15);
-  online.edgeOk = Boolean(state.validation && state.validation.expectancy > 0 && liveOk);
-
-  return { ...state, online };
+  const next = { ...state, online };
+  const honesty = computeHonesty(next, {
+    candleCount: state.candleCount ?? 0,
+    closedPaperTrades: online.closedTrades,
+    paperPnlUsdt: ctx.paperPnlUsdt ?? 0,
+  });
+  next.honesty = honesty;
+  // Paper edge only when honesty says so — never from a single lucky trade.
+  online.edgeOk = honesty.readyForPaper;
+  next.online = online;
+  return next;
 }
 
 /**
@@ -253,7 +275,17 @@ export function recordOnlineTrade(state, pnlPct) {
  * @param {LearningState} state
  */
 export function decideEntry(candles, state) {
-  if (!state.online.edgeOk || !state.validation || state.validation.netPnlPct <= 0) {
+  const honesty = state.honesty ?? computeHonesty(state, { candleCount: state.candleCount ?? candles.length });
+  if (!honesty.readyForPaper || !state.online.edgeOk) {
+    return {
+      signal: null,
+      price: candles.at(-1)?.close ?? 0,
+      stop: null,
+      take: null,
+      reason: `learning_blocked_conf_${honesty.confidence}`,
+    };
+  }
+  if (!state.validation || state.validation.netPnlPct <= 0) {
     return {
       signal: null,
       price: candles.at(-1)?.close ?? 0,
@@ -264,3 +296,5 @@ export function decideEntry(candles, state) {
   }
   return liveSignal(candles, state.params);
 }
+
+export { computeHonesty };

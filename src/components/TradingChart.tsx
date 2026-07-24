@@ -1,10 +1,19 @@
 // src/components/TradingChart.tsx
-import { createChart, type IChartApi, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts';
+import {
+  CandlestickSeries,
+  createChart,
+  createSeriesMarkers,
+  type IChartApi,
+  type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type SeriesMarker,
+  type UTCTimestamp,
+} from 'lightweight-charts';
 import React, { useEffect, useRef } from 'react';
-import type { Trade } from '../App'; // Import the Trade type
+import type { Trade } from '../App';
 
-// --- Component Props ---
-// We define what information this component needs from its parent (App.tsx)
+const BINANCE_DATA_API = 'https://data-api.binance.vision/api/v3';
+
 interface TradingChartProps {
   trades: Trade[];
 }
@@ -13,14 +22,14 @@ const TradingChart: React.FC<TradingChartProps> = ({ trades }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const markersRef = useRef<ISeriesMarkersPluginApi<UTCTimestamp> | null>(null);
 
-  // --- Chart Initialization and Styling ---
   useEffect(() => {
     if (!chartContainerRef.current || chartRef.current) return;
 
     const chart = createChart(chartContainerRef.current, {
       layout: {
-        background: { color: '#1a1a1b' }, // Dark background
+        background: { color: '#1a1a1b' },
         textColor: '#d7dadc',
       },
       grid: {
@@ -29,15 +38,17 @@ const TradingChart: React.FC<TradingChartProps> = ({ trades }) => {
       },
       timeScale: {
         borderColor: '#343536',
-        timeVisible: true, // Show time on the bottom axis
+        timeVisible: true,
         secondsVisible: false,
       },
       crosshair: {
-        mode: 1, // Magnet crosshair
+        mode: 1,
       },
+      width: chartContainerRef.current.clientWidth,
+      height: 384,
     });
 
-    const candleSeries = chart.addCandlestickSeries({
+    const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#28a745',
       downColor: '#dc3545',
       borderDownColor: '#dc3545',
@@ -48,51 +59,59 @@ const TradingChart: React.FC<TradingChartProps> = ({ trades }) => {
 
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
+    markersRef.current = createSeriesMarkers(candleSeries, []);
 
-    // Handle chart resizing
     const handleResize = () => {
-      chart.applyOptions({ width: chartContainerRef.current!.clientWidth });
+      if (!chartContainerRef.current) return;
+      chart.applyOptions({ width: chartContainerRef.current.clientWidth });
     };
     window.addEventListener('resize', handleResize);
 
-    // Clean up on component unmount
     return () => {
       window.removeEventListener('resize', handleResize);
       chart.remove();
       chartRef.current = null;
+      candleSeriesRef.current = null;
+      markersRef.current = null;
     };
   }, []);
 
-  // --- Fetch and Update Chart Data ---
   useEffect(() => {
     const fetchCandleData = async () => {
       if (!candleSeriesRef.current) return;
       try {
-        // Fetch the last 500 1-minute candles from Binance
-        const response = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=500');
+        const response = await fetch(
+          `${BINANCE_DATA_API}/klines?symbol=BTCUSDT&interval=1m&limit=500`,
+        );
+        if (!response.ok) {
+          throw new Error(`Chart data request failed: ${response.status}`);
+        }
         const data = await response.json();
 
-        const formattedData = data.map((d: any) => ({
-          time: (d[0] / 1000) as UTCTimestamp,
-          open: parseFloat(d[1]),
-          high: parseFloat(d[2]),
-          low: parseFloat(d[3]),
-          close: parseFloat(d[4]),
+        const formattedData = data.map((d: (string | number)[]) => ({
+          time: (Number(d[0]) / 1000) as UTCTimestamp,
+          open: parseFloat(String(d[1])),
+          high: parseFloat(String(d[2])),
+          low: parseFloat(String(d[3])),
+          close: parseFloat(String(d[4])),
         }));
 
         candleSeriesRef.current.setData(formattedData);
+        chartRef.current?.timeScale().fitContent();
       } catch (error) {
-        console.error("Failed to fetch chart data:", error);
+        console.error('Failed to fetch chart data:', error);
       }
     };
+
     fetchCandleData();
+    const intervalId = window.setInterval(fetchCandleData, 60_000);
+    return () => window.clearInterval(intervalId);
   }, []);
 
-  // --- Add markers for trades ---
   useEffect(() => {
-    if (!candleSeriesRef.current || trades.length === 0) return;
+    if (!markersRef.current) return;
 
-    const markers = trades.map(trade => ({
+    const markers: SeriesMarker<UTCTimestamp>[] = trades.map((trade) => ({
       time: (new Date(trade.created_at).getTime() / 1000) as UTCTimestamp,
       position: trade.type === 'buy' ? 'belowBar' : 'aboveBar',
       color: trade.type === 'buy' ? '#28a745' : '#dc3545',
@@ -100,10 +119,8 @@ const TradingChart: React.FC<TradingChartProps> = ({ trades }) => {
       text: `${trade.type.toUpperCase()} @ ${trade.price.toFixed(2)}`,
     }));
 
-    candleSeriesRef.current.setMarkers(markers);
-
-  }, [trades]); // Re-run this effect whenever the trades array changes
-
+    markersRef.current.setMarkers(markers);
+  }, [trades]);
 
   return <div ref={chartContainerRef} className="w-full h-96" />;
 };

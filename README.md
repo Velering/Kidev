@@ -1,73 +1,43 @@
-# React + TypeScript + Vite
+# Kidev Trading Bot
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript Dashboard für den Binance Paper-Trading Bot.
 
-Currently, two official plugins are available:
+## Schnellstart
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+cp .env.example .env   # optional: Supabase-Werte eintragen
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Ohne Supabase startet das Dashboard im **Demo-Modus** mit Live-BTC/USDT-Chart.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Scripts
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+| Befehl | Beschreibung |
+| --- | --- |
+| `npm run dev` | Lokaler Dev-Server |
+| `npm run build` | Produktions-Build nach `dist/` |
+| `npm run preview` | Statischen Build lokal ansehen |
+| `npm test` | Vitest |
+
+## Backend (Supabase Edge Function)
+
+Die Bot-Logik liegt unter `supabase/functions/trading-bot`.
+
+Benötigte Secrets im Supabase-Projekt:
+
+- `BINANCE_API_KEY`
+- `BINANCE_SECRET_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY` (meist automatisch vorhanden)
+
+Marktdaten kommen über `https://data-api.binance.vision` (weniger geo-restricted als `api.binance.com`).
+Orders laufen weiter über das Binance Testnet.
+
+## Datenbank
+
+Tabelle `trades` (Auszug):
+
+- `symbol`, `type`, `price`, `quantity`
+- `status` (`open` / `closed`)
+- `stop_loss`, `take_profit`, `pnl`, `closed_at`

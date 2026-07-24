@@ -48,7 +48,9 @@ async function placeTestnetOrder(symbol: string, side: 'BUY' | 'SELL', quantity:
 }
 
 async function fetchCurrentPrice(symbol: string): Promise<number> {
-    const url = `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
+    // data-api.binance.vision is the public market-data endpoint and works from more regions
+    // than api.binance.com (which is geo-restricted in some locations).
+    const url = `https://data-api.binance.vision/api/v3/ticker/price?symbol=${symbol}`;
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Failed to fetch current price for ${symbol}`);
     const data = await response.json();
@@ -114,7 +116,7 @@ async function runTradingLogic(supabase: SupabaseClient, apiKey: string, apiSecr
     }
 
     // --- 2. If No Open Position, Look for a New Signal ---
-    const binanceUrl = `https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=${LONG_WINDOW + 5}`;
+    const binanceUrl = `https://data-api.binance.vision/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=${LONG_WINDOW + 5}`;
     const binanceResponse = await fetch(binanceUrl);
     if (!binanceResponse.ok) throw new Error(`Binance API error: ${binanceResponse.statusText}`);
     const klines: any[] = await binanceResponse.json();

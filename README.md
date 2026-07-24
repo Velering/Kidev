@@ -1,8 +1,16 @@
-# Kidev Trading Bot
+# Kidev Learning Bot
 
-React-Dashboard + lokaler Paper-Trading-Server (BTC/USDT, SMA-Kreuzung, SL/TP).
+Paper-Trading-Bot, der **lernt**, wann Trades einen Edge haben — nicht nur Demo-Daten anzeigt.
 
-## Schnellstart
+## Was er lernt
+
+1. Holt BTC/USDT 1m-Kerzen von Binance Data API  
+2. Evolutions-/Such-Schritt: EMA/RSI/ATR-Parameter  
+3. Walk-forward: Train 70% / Validation 30%  
+4. Handelt live nur, wenn Validation **profitabel** ist (PnL &gt; 0, Profit Factor ≥ 1.1)  
+5. Passt den Edge nach geschlossenen Paper-Trades online an  
+
+## Start
 
 ```bash
 npm install
@@ -10,15 +18,9 @@ npm run build
 npm start
 ```
 
-Öffne http://localhost:4173 — Trade-Historie kommt von `/api/trades`, der Bot tickt jede Minute.
+Dashboard: http://localhost:4173  
+APIs: `/api/learning`, `/api/trades`, `/api/stats`
 
-## Scripts
+## Hinweis
 
-| Befehl | Beschreibung |
-| --- | --- |
-| `npm run build` | Frontend nach `dist/` |
-| `npm start` | API + Static Server + Paper-Bot |
-| `npm run dev` | Nur Vite-Frontend (ohne API) |
-| `npm test` | Vitest |
-
-Trades werden unter `data/trades.json` gespeichert (gitignored).
+Das ist Paper-Trading / Forschung — keine Finanzberatung und kein Garant für Live-Gewinne.

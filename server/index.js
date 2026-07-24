@@ -2,22 +2,27 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  decideEntry,
+  learnFromCandles,
+  loadLearningState,
+  recordOnlineTrade,
+  saveLearningState,
+} from './lib/learner.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const DIST = path.join(ROOT, 'dist');
 const DATA_DIR = path.join(ROOT, 'data');
 const TRADES_FILE = path.join(DATA_DIR, 'trades.json');
+const LEARNING_FILE = path.join(DATA_DIR, 'learning.json');
 
 const PORT = Number(process.env.PORT || 4173);
 const SYMBOL = 'BTCUSDT';
 const INTERVAL = '1m';
-const SHORT_WINDOW = 10;
-const LONG_WINDOW = 50;
 const ORDER_QUANTITY = 0.001;
-const STOP_LOSS_PERCENTAGE = 0.01;
-const TAKE_PROFIT_PERCENTAGE = 0.02;
 const BINANCE_DATA_API = 'https://data-api.binance.vision/api/v3';
+const KLINE_LIMIT = 3000;
 
 /** @typedef {{
  *  id: number,
@@ -30,25 +35,26 @@ const BINANCE_DATA_API = 'https://data-api.binance.vision/api/v3';
  *  stop_loss?: number,
  *  take_profit?: number,
  *  pnl?: number,
- *  closed_at?: string
+ *  pnl_pct?: number,
+ *  closed_at?: string,
+ *  reason?: string,
+ *  generation?: number
  * }} Trade */
 
-function ensureStore() {
+function ensureDirs() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(TRADES_FILE)) {
     fs.writeFileSync(TRADES_FILE, JSON.stringify({ nextId: 1, trades: [] }, null, 2));
   }
 }
 
-/** @returns {{ nextId: number, trades: Trade[] }} */
 function readStore() {
-  ensureStore();
+  ensureDirs();
   return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8'));
 }
 
-/** @param {{ nextId: number, trades: Trade[] }} store */
 function writeStore(store) {
-  ensureStore();
+  ensureDirs();
   fs.writeFileSync(TRADES_FILE, JSON.stringify(store, null, 2));
 }
 
@@ -58,152 +64,182 @@ async function fetchJson(url) {
   return response.json();
 }
 
+async function fetchCandles(limit = KLINE_LIMIT) {
+  // Paginate backwards to assemble a deeper history than the single-request cap.
+  const pages = Math.max(1, Math.ceil(limit / 1000));
+  /** @type {any[]} */
+  let all = [];
+  /** @type {number | undefined} */
+  let endTime;
+
+  for (let p = 0; p < pages; p++) {
+    const qs = new URLSearchParams({
+      symbol: SYMBOL,
+      interval: INTERVAL,
+      limit: '1000',
+    });
+    if (endTime) qs.set('endTime', String(endTime));
+    const raw = await fetchJson(`${BINANCE_DATA_API}/klines?${qs}`);
+    if (!Array.isArray(raw) || raw.length === 0) break;
+    all = raw.concat(all);
+    endTime = raw[0][0] - 1;
+    if (raw.length < 1000) break;
+  }
+
+  // De-dupe by open time and keep the most recent `limit` bars.
+  const byTime = new Map();
+  for (const k of all) byTime.set(k[0], k);
+  const merged = [...byTime.values()].sort((a, b) => a[0] - b[0]).slice(-limit);
+
+  return merged.map((k) => ({
+    time: k[0],
+    open: parseFloat(k[1]),
+    high: parseFloat(k[2]),
+    low: parseFloat(k[3]),
+    close: parseFloat(k[4]),
+    volume: parseFloat(k[5]),
+  }));
+}
+
 async function fetchCurrentPrice() {
   const data = await fetchJson(`${BINANCE_DATA_API}/ticker/price?symbol=${SYMBOL}`);
   return parseFloat(data.price);
 }
 
-function calculateSMA(prices, window) {
-  const sma = [];
-  for (let i = 0; i <= prices.length - window; i++) {
-    const slice = prices.slice(i, i + window);
-    sma.push(slice.reduce((a, b) => a + b, 0) / window);
+/** @type {ReturnType<typeof loadLearningState>} */
+let learning = loadLearningState(LEARNING_FILE);
+let lastLearnMessage = 'Booting learner…';
+let learningInProgress = false;
+
+async function runLearningCycle(candidates = 120) {
+  if (learningInProgress) return learning;
+  learningInProgress = true;
+  try {
+    const candles = await fetchCandles();
+    learning = learnFromCandles(candles, learning, { candidates });
+    saveLearningState(LEARNING_FILE, learning);
+    if (learning.online.edgeOk && learning.validation) {
+      lastLearnMessage = `Gen ${learning.generation}: edge OK — val PnL ${learning.validation.netPnlPct.toFixed(2)}%, PF ${learning.validation.profitFactor.toFixed(2)}, WR ${(learning.validation.winRate * 100).toFixed(0)}%`;
+    } else {
+      lastLearnMessage = `Gen ${learning.generation}: noch kein validierter Edge — weiter lernen…`;
+    }
+    console.log(`[learn] ${lastLearnMessage}`);
+    return learning;
+  } finally {
+    learningInProgress = false;
   }
-  return sma;
+}
+
+async function manageOpenPosition(store, currentPrice, candles) {
+  const openTrade = store.trades.find((t) => t.status === 'open');
+  if (!openTrade) return null;
+
+  const last = candles[candles.length - 1];
+  let pnl = 0;
+  let shouldClose = false;
+  let reason = '';
+
+  if (openTrade.type === 'buy') {
+    pnl = (currentPrice - openTrade.price) * openTrade.quantity;
+    if (last.low <= (openTrade.stop_loss ?? -Infinity)) {
+      shouldClose = true;
+      reason = 'stop_loss';
+      pnl = ((openTrade.stop_loss ?? currentPrice) - openTrade.price) * openTrade.quantity;
+    } else if (last.high >= (openTrade.take_profit ?? Infinity)) {
+      shouldClose = true;
+      reason = 'take_profit';
+      pnl = ((openTrade.take_profit ?? currentPrice) - openTrade.price) * openTrade.quantity;
+    }
+  } else {
+    pnl = (openTrade.price - currentPrice) * openTrade.quantity;
+    if (last.high >= (openTrade.stop_loss ?? Infinity)) {
+      shouldClose = true;
+      reason = 'stop_loss';
+      pnl = (openTrade.price - (openTrade.stop_loss ?? currentPrice)) * openTrade.quantity;
+    } else if (last.low <= (openTrade.take_profit ?? -Infinity)) {
+      shouldClose = true;
+      reason = 'take_profit';
+      pnl = (openTrade.price - (openTrade.take_profit ?? currentPrice)) * openTrade.quantity;
+    }
+  }
+
+  openTrade.pnl = pnl;
+  openTrade.pnl_pct = pnl / (openTrade.price * openTrade.quantity);
+
+  if (shouldClose) {
+    openTrade.status = 'closed';
+    openTrade.closed_at = new Date().toISOString();
+    openTrade.reason = reason;
+    learning = recordOnlineTrade(learning, openTrade.pnl_pct);
+    saveLearningState(LEARNING_FILE, learning);
+    writeStore(store);
+    return `Closed ${openTrade.type} via ${reason}. PnL=${pnl.toFixed(4)} (${(openTrade.pnl_pct * 100).toFixed(3)}%)`;
+  }
+
+  writeStore(store);
+  return `Holding ${openTrade.type}. unrealized=${pnl.toFixed(4)}`;
 }
 
 async function runTradingLogic() {
+  const candles = await fetchCandles();
+  const currentPrice = candles[candles.length - 1].close;
   const store = readStore();
-  const openTrade = store.trades.find((t) => t.status === 'open');
-  const currentPrice = await fetchCurrentPrice();
 
-  if (openTrade) {
-    let pnl = 0;
-    let shouldClose = false;
+  const openMsg = await manageOpenPosition(store, currentPrice, candles);
+  if (openMsg) return openMsg;
 
-    if (openTrade.type === 'buy') {
-      pnl = (currentPrice - openTrade.price) * openTrade.quantity;
-      if (
-        (openTrade.stop_loss != null && currentPrice <= openTrade.stop_loss) ||
-        (openTrade.take_profit != null && currentPrice >= openTrade.take_profit)
-      ) {
-        shouldClose = true;
-      }
-    } else {
-      pnl = (openTrade.price - currentPrice) * openTrade.quantity;
-      if (
-        (openTrade.stop_loss != null && currentPrice >= openTrade.stop_loss) ||
-        (openTrade.take_profit != null && currentPrice <= openTrade.take_profit)
-      ) {
-        shouldClose = true;
-      }
-    }
-
-    openTrade.pnl = pnl;
-    if (shouldClose) {
-      openTrade.status = 'closed';
-      openTrade.closed_at = new Date().toISOString();
-      writeStore(store);
-      return `Closed ${openTrade.type} @ ${currentPrice}. PnL=${pnl.toFixed(4)}`;
-    }
-
-    writeStore(store);
-    return `Holding ${openTrade.type}. PnL=${pnl.toFixed(4)}`;
+  const decision = decideEntry(candles, learning);
+  if (!decision.signal || decision.stop == null || decision.take == null) {
+    return `No trade: ${decision.reason}`;
   }
-
-  const klines = await fetchJson(
-    `${BINANCE_DATA_API}/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=${LONG_WINDOW + 5}`,
-  );
-  const closePrices = klines.map((k) => parseFloat(k[4]));
-  const shortSMA = calculateSMA(closePrices, SHORT_WINDOW);
-  const longSMA = calculateSMA(closePrices, LONG_WINDOW);
-
-  if (shortSMA.length < 2 || longSMA.length < 2) {
-    return 'Not enough SMA data yet.';
-  }
-
-  const lastShort = shortSMA[shortSMA.length - 1];
-  const prevShort = shortSMA[shortSMA.length - 2];
-  const lastLong = longSMA[longSMA.length - 1];
-  const prevLong = longSMA[longSMA.length - 2];
-
-  /** @type {'buy' | 'sell' | null} */
-  let signal = null;
-  if (prevShort <= prevLong && lastShort > lastLong) signal = 'buy';
-  else if (prevShort >= prevLong && lastShort < lastLong) signal = 'sell';
-
-  if (!signal) return 'No signal. Holding.';
-
-  const entryPrice = closePrices[closePrices.length - 1];
-  const stopLoss =
-    signal === 'buy'
-      ? entryPrice * (1 - STOP_LOSS_PERCENTAGE)
-      : entryPrice * (1 + STOP_LOSS_PERCENTAGE);
-  const takeProfit =
-    signal === 'buy'
-      ? entryPrice * (1 + TAKE_PROFIT_PERCENTAGE)
-      : entryPrice * (1 - TAKE_PROFIT_PERCENTAGE);
 
   /** @type {Trade} */
   const trade = {
     id: store.nextId++,
     created_at: new Date().toISOString(),
     symbol: SYMBOL,
-    type: signal,
-    price: entryPrice,
+    type: decision.signal,
+    price: decision.price,
     quantity: ORDER_QUANTITY,
     status: 'open',
-    stop_loss: stopLoss,
-    take_profit: takeProfit,
+    stop_loss: decision.stop,
+    take_profit: decision.take,
     pnl: 0,
+    pnl_pct: 0,
+    reason: decision.reason,
+    generation: learning.generation,
   };
 
   store.trades.unshift(trade);
   writeStore(store);
-  return `Opened ${signal} @ ${entryPrice}`;
+  return `Opened ${decision.signal} @ ${decision.price.toFixed(2)} (gen ${learning.generation}, ${decision.reason})`;
 }
 
-async function seedIfEmpty() {
-  const store = readStore();
-  if (store.trades.length > 0) return;
+function publicLearning() {
+  return {
+    generation: learning.generation,
+    learnedAt: learning.learnedAt,
+    message: lastLearnMessage,
+    edgeOk: learning.online.edgeOk,
+    params: learning.params,
+    train: learning.train,
+    validation: learning.validation,
+    online: learning.online,
+    history: learning.history.slice(0, 10),
+  };
+}
 
-  try {
-    const price = await fetchCurrentPrice();
-    const minutesAgo = (m) => new Date(Date.now() - m * 60_000).toISOString();
-
-    const closedBuy = {
-      id: store.nextId++,
-      created_at: minutesAgo(25),
-      symbol: SYMBOL,
-      type: /** @type {'buy'} */ ('buy'),
-      price: price * 0.998,
-      quantity: ORDER_QUANTITY,
-      status: /** @type {'closed'} */ ('closed'),
-      stop_loss: price * 0.988,
-      take_profit: price * 1.018,
-      pnl: (price - price * 0.998) * ORDER_QUANTITY,
-      closed_at: minutesAgo(12),
-    };
-
-    const openSell = {
-      id: store.nextId++,
-      created_at: minutesAgo(8),
-      symbol: SYMBOL,
-      type: /** @type {'sell'} */ ('sell'),
-      price: price * 1.001,
-      quantity: ORDER_QUANTITY,
-      status: /** @type {'open'} */ ('open'),
-      stop_loss: price * 1.011,
-      take_profit: price * 0.981,
-      pnl: (price * 1.001 - price) * ORDER_QUANTITY,
-    };
-
-    store.trades = [openSell, closedBuy];
-    writeStore(store);
-    console.log(`Seeded ${store.trades.length} paper trades at ~${price}`);
-  } catch (error) {
-    console.error('Seed failed:', error);
-  }
+function publicStats(trades) {
+  const closed = trades.filter((t) => t.status === 'closed');
+  const wins = closed.filter((t) => (t.pnl ?? 0) > 0);
+  const totalPnl = closed.reduce((a, t) => a + (t.pnl ?? 0), 0);
+  return {
+    openPositions: trades.filter((t) => t.status === 'open').length,
+    closedTrades: closed.length,
+    winRate: closed.length ? wins.length / closed.length : 0,
+    realizedPnl: totalPnl,
+    mode: learning.online.edgeOk ? 'live_edge' : 'learning',
+  };
 }
 
 const MIME = {
@@ -217,28 +253,24 @@ const MIME = {
 };
 
 function sendJson(res, status, body) {
-  const payload = JSON.stringify(body);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
     'Cache-Control': 'no-store',
   });
-  res.end(payload);
+  res.end(JSON.stringify(body));
 }
 
 function serveStatic(req, res) {
   const urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
   let filePath = path.join(DIST, urlPath === '/' ? 'index.html' : urlPath);
-
   if (!filePath.startsWith(DIST)) {
     res.writeHead(403).end('Forbidden');
     return;
   }
-
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
     filePath = path.join(DIST, 'index.html');
   }
-
   const ext = path.extname(filePath);
   res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
   fs.createReadStream(filePath).pipe(res);
@@ -258,20 +290,44 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.startsWith('/api/health')) {
-    sendJson(res, 200, { ok: true, mode: 'paper', symbol: SYMBOL });
+    sendJson(res, 200, {
+      ok: true,
+      symbol: SYMBOL,
+      mode: learning.online.edgeOk ? 'live_edge' : 'learning',
+      generation: learning.generation,
+    });
+    return;
+  }
+
+  if (url.startsWith('/api/learning')) {
+    sendJson(res, 200, publicLearning());
+    return;
+  }
+
+  if (url.startsWith('/api/stats')) {
+    sendJson(res, 200, publicStats(readStore().trades));
     return;
   }
 
   if (url.startsWith('/api/trades')) {
-    const store = readStore();
-    sendJson(res, 200, store.trades);
+    sendJson(res, 200, readStore().trades);
+    return;
+  }
+
+  if (url.startsWith('/api/learn') && req.method === 'POST') {
+    try {
+      await runLearningCycle();
+      sendJson(res, 200, publicLearning());
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    }
     return;
   }
 
   if (url.startsWith('/api/bot/run') && req.method === 'POST') {
     try {
       const message = await runTradingLogic();
-      sendJson(res, 200, { message, trades: readStore().trades });
+      sendJson(res, 200, { message, trades: readStore().trades, learning: publicLearning() });
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -281,21 +337,43 @@ const server = http.createServer(async (req, res) => {
   serveStatic(req, res);
 });
 
-await seedIfEmpty();
+// Clear fake seed trades from earlier demo fix — learner should earn its history.
+ensureDirs();
+{
+  const store = readStore();
+  const looksSeeded =
+    store.trades.length > 0 &&
+    store.trades.every((t) => t.generation == null && t.reason == null);
+  if (looksSeeded) {
+    writeStore({ nextId: 1, trades: [] });
+    console.log('[boot] Cleared seeded demo trades — learning from market data instead.');
+  }
+}
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Kidev paper-trading server on http://0.0.0.0:${PORT}`);
+  console.log(`Kidev learning bot on http://0.0.0.0:${PORT}`);
 });
 
-// Keep open positions' PnL fresh and look for new SMA signals.
-const tick = async () => {
+// Learn several generations at boot, then trade only with validated edge.
+(async () => {
   try {
-    const message = await runTradingLogic();
-    console.log(`[bot] ${message}`);
+    for (let i = 0; i < 5; i++) {
+      await runLearningCycle(160);
+      if (learning.online.edgeOk) break;
+    }
+    const msg = await runTradingLogic();
+    console.log(`[bot] ${msg}`);
   } catch (error) {
-    console.error('[bot] tick failed:', error);
+    console.error('[boot] failed:', error);
   }
-};
+})();
 
-setTimeout(tick, 3_000);
-setInterval(tick, 60_000);
+setInterval(() => {
+  runLearningCycle().catch((error) => console.error('[learn] cycle failed:', error));
+}, 15 * 60_000);
+
+setInterval(() => {
+  runTradingLogic()
+    .then((message) => console.log(`[bot] ${message}`))
+    .catch((error) => console.error('[bot] tick failed:', error));
+}, 60_000);

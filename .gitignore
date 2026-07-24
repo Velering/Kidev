@@ -18,6 +18,9 @@ dist-ssr
 # Environment variables
 .env
 
+# Local paper-trading store
+data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

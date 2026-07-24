@@ -5,6 +5,13 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   base: './',
   plugins: [react()],
+  server: {
+    // Allow Cloudflare quick tunnels (*.trycloudflare.com)
+    allowedHosts: true,
+  },
+  preview: {
+    allowedHosts: true,
+  },
   test: {
     globals: true,
     environment: 'jsdom',

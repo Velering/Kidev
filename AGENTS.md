@@ -1,31 +1,28 @@
 # Kidev Learning Bot
 
-React + TypeScript + Vite dashboard plus a local Node paper-trading server that
-learns a profitable edge (EMA/RSI/ATR) before trading. An optional Supabase Deno
-Edge Function still lives under `supabase/functions/trading-bot`.
+React + TypeScript + Vite dashboard with a local Node paper-trading / learning bot
+under `server/`. An optional Supabase Deno Edge Function remains under
+`supabase/functions/trading-bot` for Binance Testnet experiments.
 
 ## Cursor Cloud specific instructions
 
 ### Services
 
-- **Local paper-trading server** — primary runtime after build:
-  `npm run build && npm start`. Serves `dist/` and APIs on
-  `http://localhost:4173/` (`/api/trades`, `/api/learning`, `/api/stats`,
-  `/api/health`). Learner + bot loop run in-process; no Supabase required.
-- **Frontend dashboard (Vite)** — `npm run dev` on `http://localhost:5173/` for
-  UI-only work. Prefer `npm start` for full bot + learning verification (API
-  routes are proxied/served by the Node server in production mode).
-- **Supabase Edge Function `trading-bot`** — optional legacy/cloud backend.
-  There is no Supabase CLI config committed; not needed for local verification.
+- **Learning bot + dashboard (`npm start`)** — after `npm run build`, serves UI and
+  `/api/*` on `http://localhost:4173/`.
+- **Dev split** — `npm run bot` (API on `:8787`, `API_ONLY=1`) + `npm run dev`
+  (Vite on `:5173`, proxies `/api` → `:8787`).
+- **Supabase Edge Function `trading-bot`** — optional; not required for the local
+  learning stack. Needs Binance Testnet secrets if used.
 
 ### Non-obvious notes
 
-- Full stack path: `npm install && npm run build && npm start`. Dashboard title
-  is **Kidev Learning Bot**; status shows Learning vs Trading (Edge) with
-  generation number.
-- The live chart and learner fetch candles from Binance Data API
-  (`https://data-api.binance.vision`). Outbound access to that host is required.
-- Trade state persists under `data/trades.json` (gitignored).
-- `npm run lint` still flags a pre-existing `no-explicit-any` in
-  `supabase/functions/trading-bot/index.ts` and may exit non-zero.
-- This is paper trading / research only — not financial advice.
+- Primary path is **local paper trading**. No Supabase secrets are required for
+  `npm start` / `npm run bot`.
+- The live chart fetches candles from Binance
+  (`https://data-api.binance.vision`) — outbound access to that host is required.
+- Bot state is stored under `data/` (`trades.json`, `learning.json`); the folder
+  is gitignored.
+- `npm run lint` lints TS/TSX. Keep Edge Function free of `any` so lint stays green.
+- The bot only opens live paper trades when walk-forward validation shows an edge
+  (`edgeOk`); otherwise the dashboard stays in Learning mode.

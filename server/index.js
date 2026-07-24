@@ -17,7 +17,8 @@ const DATA_DIR = path.join(ROOT, 'data');
 const TRADES_FILE = path.join(DATA_DIR, 'trades.json');
 const LEARNING_FILE = path.join(DATA_DIR, 'learning.json');
 
-const PORT = Number(process.env.PORT || 4173);
+const PORT = Number(process.env.PORT || (process.env.API_ONLY === '1' ? 8787 : 4173));
+const API_ONLY = process.env.API_ONLY === '1';
 const SYMBOL = 'BTCUSDT';
 const INTERVAL = '1m';
 const ORDER_QUANTITY = 0.001;
@@ -67,7 +68,7 @@ async function fetchJson(url) {
 async function fetchCandles(limit = KLINE_LIMIT) {
   // Paginate backwards to assemble a deeper history than the single-request cap.
   const pages = Math.max(1, Math.ceil(limit / 1000));
-  /** @type {any[]} */
+  /** @type {Array<Array<string | number>>} */
   let all = [];
   /** @type {number | undefined} */
   let endTime;
@@ -111,11 +112,11 @@ let learning = loadLearningState(LEARNING_FILE);
 let lastLearnMessage = 'Booting learner…';
 let learningInProgress = false;
 
-async function runLearningCycle(candidates = 120) {
+async function runLearningCycle(candidates = 120, candlesHint) {
   if (learningInProgress) return learning;
   learningInProgress = true;
   try {
-    const candles = await fetchCandles();
+    const candles = candlesHint ?? (await fetchCandles());
     learning = learnFromCandles(candles, learning, { candidates });
     saveLearningState(LEARNING_FILE, learning);
     if (learning.online.edgeOk && learning.validation) {
@@ -334,6 +335,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (API_ONLY) {
+    sendJson(res, 404, { error: 'Not found (API_ONLY mode — use Vite for the UI)' });
+    return;
+  }
+
   serveStatic(req, res);
 });
 
@@ -351,14 +357,19 @@ ensureDirs();
 }
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Kidev learning bot on http://0.0.0.0:${PORT}`);
+  console.log(
+    API_ONLY
+      ? `Kidev learning bot API on http://0.0.0.0:${PORT} (API_ONLY)`
+      : `Kidev learning bot on http://0.0.0.0:${PORT}`,
+  );
 });
 
 // Learn several generations at boot, then trade only with validated edge.
 (async () => {
   try {
+    const candles = await fetchCandles();
     for (let i = 0; i < 5; i++) {
-      await runLearningCycle(160);
+      await runLearningCycle(160, candles);
       if (learning.online.edgeOk) break;
     }
     const msg = await runTradingLogic();

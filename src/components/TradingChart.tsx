@@ -111,13 +111,16 @@ const TradingChart: React.FC<TradingChartProps> = ({ trades }) => {
   useEffect(() => {
     if (!markersRef.current) return;
 
-    const markers: SeriesMarker<UTCTimestamp>[] = trades.map((trade) => ({
-      time: (new Date(trade.created_at).getTime() / 1000) as UTCTimestamp,
-      position: trade.type === 'buy' ? 'belowBar' : 'aboveBar',
-      color: trade.type === 'buy' ? '#28a745' : '#dc3545',
-      shape: trade.type === 'buy' ? 'arrowUp' : 'arrowDown',
-      text: `${trade.type.toUpperCase()} @ ${trade.price.toFixed(2)}`,
-    }));
+    const markers: SeriesMarker<UTCTimestamp>[] = trades
+      .map((trade) => ({
+        time: (new Date(trade.created_at).getTime() / 1000) as UTCTimestamp,
+        position: trade.type === 'buy' ? ('belowBar' as const) : ('aboveBar' as const),
+        color: trade.type === 'buy' ? '#28a745' : '#dc3545',
+        shape: trade.type === 'buy' ? ('arrowUp' as const) : ('arrowDown' as const),
+        text: `${trade.type.toUpperCase()} @ ${trade.price.toFixed(2)}`,
+      }))
+      // lightweight-charts requires ascending marker times
+      .sort((a, b) => a.time - b.time);
 
     markersRef.current.setMarkers(markers);
   }, [trades]);

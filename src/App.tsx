@@ -209,7 +209,13 @@ function App() {
                         {trade.status}
                       </td>
                       <td
-                        className={`p-2 font-mono ${trade.pnl == null ? 'text-gray-500' : trade.pnl > 0 ? 'text-green-500' : 'text-red-500'}`}
+                        className={`p-2 font-mono ${
+                          trade.pnl == null || trade.pnl === 0
+                            ? 'text-gray-500'
+                            : trade.pnl > 0
+                              ? 'text-green-500'
+                              : 'text-red-500'
+                        }`}
                       >
                         {trade.pnl != null ? trade.pnl.toFixed(4) : 'N/A'}
                       </td>

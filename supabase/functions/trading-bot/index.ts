@@ -77,21 +77,30 @@ async function runTradingLogic(supabase: SupabaseClient, apiKey: string, apiSecr
         const currentPrice = await fetchCurrentPrice(SYMBOL);
         let shouldClose = false;
         let pnl = 0;
+        const stopLoss = openTrade.stop_loss;
+        const takeProfit = openTrade.take_profit;
 
         if (openTrade.type === 'buy') {
             pnl = (currentPrice - openTrade.price) * openTrade.quantity;
-            if (currentPrice <= openTrade.stop_loss || currentPrice >= openTrade.take_profit) {
+            if (
+                (typeof stopLoss === 'number' && currentPrice <= stopLoss) ||
+                (typeof takeProfit === 'number' && currentPrice >= takeProfit)
+            ) {
                 shouldClose = true;
             }
         } else { // sell
             pnl = (openTrade.price - currentPrice) * openTrade.quantity;
-            if (currentPrice >= openTrade.stop_loss || currentPrice <= openTrade.take_profit) {
+            if (
+                (typeof stopLoss === 'number' && currentPrice >= stopLoss) ||
+                (typeof takeProfit === 'number' && currentPrice <= takeProfit)
+            ) {
                 shouldClose = true;
             }
         }
 
         // Update PnL in real-time for UI
-         await supabase.from('trades').update({ pnl }).eq('id', openTrade.id);
+        const { error: pnlError } = await supabase.from('trades').update({ pnl }).eq('id', openTrade.id);
+        if (pnlError) console.error('Failed to update open PnL:', pnlError.message);
 
         if (shouldClose) {
             console.log(`Closing position for ${SYMBOL} due to SL/TP hit.`);
@@ -119,8 +128,8 @@ async function runTradingLogic(supabase: SupabaseClient, apiKey: string, apiSecr
     const binanceUrl = `https://data-api.binance.vision/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=${LONG_WINDOW + 5}`;
     const binanceResponse = await fetch(binanceUrl);
     if (!binanceResponse.ok) throw new Error(`Binance API error: ${binanceResponse.statusText}`);
-    const klines: any[] = await binanceResponse.json();
-    const closePrices: number[] = klines.map(kline => parseFloat(kline[4]));
+    const klines = (await binanceResponse.json()) as Array<Array<string | number>>;
+    const closePrices: number[] = klines.map((kline) => parseFloat(String(kline[4])));
 
     const calculateSMA = (prices: number[], window: number): number[] => {
         const sma: number[] = [];
@@ -141,9 +150,12 @@ async function runTradingLogic(supabase: SupabaseClient, apiKey: string, apiSecr
     const lastLongSMA = longSMA[longSMA.length - 1];
     const prevLongSMA = longSMA[longSMA.length - 2];
 
-    let signal: 'buy' | 'sell' | null = null;
+    // Spot testnet cannot naked-short — only open long entries here.
+    let signal: 'buy' | null = null;
     if (prevShortSMA <= prevLongSMA && lastShortSMA > lastLongSMA) signal = 'buy';
-    else if (prevShortSMA >= prevLongSMA && lastShortSMA < lastLongSMA) signal = 'sell';
+    else if (prevShortSMA >= prevLongSMA && lastShortSMA < lastLongSMA) {
+        return 'Short signal ignored on spot testnet (long-only).';
+    }
 
     if (!signal) {
         return 'No new signal detected. Holding.';
@@ -151,18 +163,22 @@ async function runTradingLogic(supabase: SupabaseClient, apiKey: string, apiSecr
 
     // --- 3. Execute New Trade and Open Position ---
     console.log(`New signal detected: ${signal.toUpperCase()} for ${SYMBOL}`);
-    await placeTestnetOrder(SYMBOL, signal.toUpperCase() as 'BUY' | 'SELL', ORDER_QUANTITY, apiKey, apiSecret);
+    const order = await placeTestnetOrder(SYMBOL, 'BUY', ORDER_QUANTITY, apiKey, apiSecret);
 
-    const entryPrice = closePrices[closePrices.length - 1];
-    let stopLoss, takeProfit;
-
-    if (signal === 'buy') {
-        stopLoss = entryPrice * (1 - STOP_LOSS_PERCENTAGE);
-        takeProfit = entryPrice * (1 + TAKE_PROFIT_PERCENTAGE);
-    } else { // sell
-        stopLoss = entryPrice * (1 + STOP_LOSS_PERCENTAGE);
-        takeProfit = entryPrice * (1 - TAKE_PROFIT_PERCENTAGE);
+    let entryPrice = closePrices[closePrices.length - 1];
+    const fills = Array.isArray(order?.fills) ? order.fills as Array<{ price: string; qty: string }> : [];
+    if (fills.length > 0) {
+      let notional = 0;
+      let qtySum = 0;
+      for (const fill of fills) {
+        const qty = parseFloat(fill.qty);
+        notional += parseFloat(fill.price) * qty;
+        qtySum += qty;
+      }
+      if (qtySum > 0) entryPrice = notional / qtySum;
     }
+    const stopLoss = entryPrice * (1 - STOP_LOSS_PERCENTAGE);
+    const takeProfit = entryPrice * (1 + TAKE_PROFIT_PERCENTAGE);
 
     const { error: insertError } = await supabase.from('trades').insert({
         symbol: SYMBOL,
@@ -205,7 +221,8 @@ serve(async (req) => {
         });
     } catch (error) {
         console.error("Error in Edge Function:", error);
-        return new Response(JSON.stringify({ error: error.message }), {
+        const message = error instanceof Error ? error.message : String(error);
+        return new Response(JSON.stringify({ error: message }), {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             status: 500,
         });

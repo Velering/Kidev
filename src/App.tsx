@@ -22,6 +22,7 @@ interface LearningInfo {
   generation: number;
   learnedAt: string | null;
   message: string;
+  lastBotMessage?: string;
   edgeOk: boolean;
   params: Record<string, number>;
   train: null | {
@@ -135,6 +136,11 @@ function App() {
                 <p className={learning.edgeOk ? 'text-green-400' : 'text-yellow-300'}>
                   {learning.message}
                 </p>
+                {learning.lastBotMessage && (
+                  <p className="text-gray-400 font-mono text-xs break-words">
+                    Bot: {learning.lastBotMessage}
+                  </p>
+                )}
                 <p>
                   Validation PnL:{' '}
                   <span className="text-white font-mono">

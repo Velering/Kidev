@@ -110,7 +110,9 @@ async function fetchCurrentPrice() {
 /** @type {ReturnType<typeof loadLearningState>} */
 let learning = loadLearningState(LEARNING_FILE);
 let lastLearnMessage = 'Booting learner…';
+let lastBotMessage = 'Booting bot…';
 let learningInProgress = false;
+let tradingInProgress = false;
 
 async function runLearningCycle(candidates = 120, candlesHint) {
   if (learningInProgress) return learning;
@@ -182,38 +184,49 @@ async function manageOpenPosition(store, currentPrice, candles) {
 }
 
 async function runTradingLogic() {
-  const candles = await fetchCandles();
-  const currentPrice = candles[candles.length - 1].close;
-  const store = readStore();
+  if (tradingInProgress) return lastBotMessage || 'Trading tick already in progress';
+  tradingInProgress = true;
+  try {
+    const candles = await fetchCandles();
+    const currentPrice = candles[candles.length - 1].close;
+    const store = readStore();
 
-  const openMsg = await manageOpenPosition(store, currentPrice, candles);
-  if (openMsg) return openMsg;
+    const openMsg = await manageOpenPosition(store, currentPrice, candles);
+    if (openMsg) {
+      lastBotMessage = openMsg;
+      return openMsg;
+    }
 
-  const decision = decideEntry(candles, learning);
-  if (!decision.signal || decision.stop == null || decision.take == null) {
-    return `No trade: ${decision.reason}`;
+    const decision = decideEntry(candles, learning);
+    if (!decision.signal || decision.stop == null || decision.take == null) {
+      lastBotMessage = `No trade: ${decision.reason}`;
+      return lastBotMessage;
+    }
+
+    /** @type {Trade} */
+    const trade = {
+      id: store.nextId++,
+      created_at: new Date().toISOString(),
+      symbol: SYMBOL,
+      type: decision.signal,
+      price: decision.price,
+      quantity: ORDER_QUANTITY,
+      status: 'open',
+      stop_loss: decision.stop,
+      take_profit: decision.take,
+      pnl: 0,
+      pnl_pct: 0,
+      reason: decision.reason,
+      generation: learning.generation,
+    };
+
+    store.trades.unshift(trade);
+    writeStore(store);
+    lastBotMessage = `Opened ${decision.signal} @ ${decision.price.toFixed(2)} (gen ${learning.generation}, ${decision.reason})`;
+    return lastBotMessage;
+  } finally {
+    tradingInProgress = false;
   }
-
-  /** @type {Trade} */
-  const trade = {
-    id: store.nextId++,
-    created_at: new Date().toISOString(),
-    symbol: SYMBOL,
-    type: decision.signal,
-    price: decision.price,
-    quantity: ORDER_QUANTITY,
-    status: 'open',
-    stop_loss: decision.stop,
-    take_profit: decision.take,
-    pnl: 0,
-    pnl_pct: 0,
-    reason: decision.reason,
-    generation: learning.generation,
-  };
-
-  store.trades.unshift(trade);
-  writeStore(store);
-  return `Opened ${decision.signal} @ ${decision.price.toFixed(2)} (gen ${learning.generation}, ${decision.reason})`;
 }
 
 function publicLearning() {
@@ -221,6 +234,7 @@ function publicLearning() {
     generation: learning.generation,
     learnedAt: learning.learnedAt,
     message: lastLearnMessage,
+    lastBotMessage,
     edgeOk: learning.online.edgeOk,
     params: learning.params,
     train: learning.train,
@@ -296,6 +310,8 @@ const server = http.createServer(async (req, res) => {
       symbol: SYMBOL,
       mode: learning.online.edgeOk ? 'live_edge' : 'learning',
       generation: learning.generation,
+      lastBotMessage,
+      lastLearnMessage,
     });
     return;
   }
